@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PayGate — Admin Console</title>
+<link rel="stylesheet" href="/css/gate-ui.css">
+<style>
+  .login-wrap { max-width: 400px; margin: 12vh auto; }
+  .drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(520px, 100%); background: var(--surface); border-left: 1px solid var(--border); z-index: 960; padding: 24px; overflow: auto; animation: slidein var(--t-sheet) var(--ease); }
+  @keyframes slidein { from { transform: translateX(30px); opacity: 0; } }
+  @media (max-width: 720px) { table.data thead { display: none; } table.data, table.data tbody, table.data tr, table.data td { display: block; width: 100%; } table.data tr { border-bottom: 1px solid var(--border); } table.data td { height: auto; border: none; padding: 4px 16px; } }
+</style>
+</head>
+<body>
+<div id="root"></div><div id="toasts"></div>
+<script src="/js/gate-ui.js"></script>
+<script>
+const G = window.GateUI;
+let TOKEN = sessionStorage.getItem('pg_staff') || '';
+let view = 'overview';
+
+function api(path, opts = {}) {
+  return fetch('/v1/admin' + path, { ...opts, headers: { 'Content-Type': 'application/json', 'x-staff-token': TOKEN, ...(opts.headers || {}) } })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (r.status === 401 && path !== '/login') { logout(); } if (!r.ok) throw Object.assign(new Error(j.message || j.error), { body: j }); return j; });
+}
+function logout() { sessionStorage.removeItem('pg_staff'); location.href = '/admin'; }
+
+// ---- login with mandatory 2FA ----
+function renderLogin() {
+  document.getElementById('root').innerHTML = `
+  <div class="login-wrap stack">
+    <div style="font-weight:700;font-size:18px;text-align:center">🛡 PayGate <span class="chip danger"><span class="dot"></span>Staff</span></div>
+    <div class="card stack">
+      <h2>Admin sign-in</h2>
+      <div class="field"><label>Email</label><input class="input" id="em" value="ops@paygate.local"></div>
+      <div class="field"><label>Password</label><input class="input" id="pw" type="password" placeholder="paygate-admin-2026"></div>
+      <div class="field"><label>2FA code (mandatory)</label><input class="input mono" id="otp" maxlength="6" placeholder="246810 (dev)"></div>
+      <button class="btn primary block" id="go">Sign in</button>
+      <div id="err" style="color:var(--danger);font-size:12px"></div>
+    </div>
+  </div>`;
+  document.getElementById('go').onclick = async () => {
+    try {
+      const r = await fetch('/v1/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: em.value, password: pw.value, totp: otp.value }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.message || 'Login failed');
+      TOKEN = j.token; sessionStorage.setItem('pg_staff', TOKEN); renderShell();
+    } catch (e) { err.textContent = e.message; }
+  };
+}
+
+const NAVS = [['overview','▦ Overview'],['review','⚠ Review queue'],['wallets','◍ Wallets'],['devices','▯ Devices'],['payouts','¥ Payouts'],['merchants','🏬 Merchants'],['webhooks','↗ Webhooks'],['audit','≣ Audit log']];
+function renderShell() {
+  document.getElementById('root').innerHTML = `
+  <div class="shell">
+    <nav class="sidebar"><div class="logo">🛡 PayGate Ops</div>
+    ${NAVS.map(([id,l]) => `<button class="nav-item" id="nav-${id}" onclick="view='${id}';renderView()">${l}</button>`).join('')}
+    <div style="flex:1"></div><button class="nav-item" id="themeBtn2">◐ Theme</button><button class="nav-item" onclick="logout()">⇥ Sign out</button></nav>
+    <main class="main" id="main"></main></div>`;
+  G.initTheme('themeBtn2');
+  renderView();
+}
+window.logout = logout; window.view = view;
+window.renderView = function () {
+  NAVS.forEach(([id]) => document.getElementById('nav-' + id)?.classList.toggle('sel', id === view));
+  ({ overview, review, wallets, devices, payouts, merchants, webhooks, audit })[view]();
+};
+function chip(s, extra) { const L={needs_review:'Needs review',paid:'Paid',awaiting_payment:'Awaiting payment',confirming:'Confirming',expired:'Expired',cancelled:'Cancelled',active:'Active',draining:'Draining',paused:'Paused',frozen:'Frozen',online:'Online',offline:'Offline',revoked:'Revoked',unpaired:'Unpaired',pending_approval:'Pending approval',approved_by_maker:'Approved — needs second staff',rejected:'Rejected',failed:'Failed',delivered:'Delivered',queued:'Queued',verified:'KYB verified',pending:'Pending'}; return `<span class="chip ${s}"><span class="dot"></span>${L[s]||s}${extra?' · '+extra:''}</span>`; }
+function table(heads, rows, clickable) { return `<div class="table-wrap"><table class="data"><thead><tr>${heads.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map((r,i)=>`<tr ${clickable?`onclick="rowClick(${i})"`:''}>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`; }
+async function getJSON(p){return api(p);}
+let _rows=[]; window.rowClick=(i)=>_rows[i]&&_rows[i]._click&&_rows[i]._click();
+
+// ---- views ----
+async function overview() {
+  const o = await getJSON('/overview');
+  document.getElementById('main').innerHTML = `<h1>Ops overview</h1>
+  <div class="grid cols-4" style="margin-top:16px">
+    ${[['Payments today',o.payments_today],['Collected today',G.taka(o.paid_today_paisa)],['Needs review',o.needs_review],['Unmatched txns',o.unmatched],['Devices online',`${o.devices_online}/${o.devices_total}`],['Failed webhooks',o.failed_webhooks]]
+      .map(([l,v])=>`<div class="card stat"><div class="label">${l}</div><div class="value num">${v}</div></div>`).join('')}
+  </div>
+  <div class="banner warning" style="margin-top:16px">⚠ Alerting (daily-volume spikes, >10% underpayments per merchant, wallet offline >5 min, webhook failure bursts) is wired into these counters; notification channels are P1.</div>`;
+}
+async function review() {
+  const r = await getJSON('/review');
+  _rows = r.data;
+  document.getElementById('main').innerHTML = `<h1>Review queue</h1><div class="caption">Reasons: wrong_wallet · conflict · underpaid · overpaid · late_payment · trxid_already_claimed · time_window</div>
+  <div style="margin-top:16px">${r.data.length?table(['Ref','Merchant','Provider','Amount','Reason','TrxID',''],r.data.map(p=>[`<span class="ref-chip" style="font-size:12px;height:26px">${p.reference}</span>`,p.merchant_name,p.provider,`<span class="mono num">${G.taka(p.amount)}</span>`,`<span class="chip danger"><span class="dot"></span>${p.review_reason}</span>`,`<span class="mono">${p.submitted_trx_id||'—'}</span>`,`<button class="btn ghost" onclick="openReview('${p.id}')">Open</button>`])):'<div class="empty card">Queue clear ✓</div>'}</div>
+  <h2 style="margin-top:24px">Unmatched incoming transactions</h2>
+  <div class="caption">Money that arrived without a claim. Suggest a match by provider+amount, or hold as surplus.</div>
+  <div style="margin-top:8px">${r.unmatched.length?table(['Received','Provider','Wallet','Amount','Ref','TrxID','Flags',''],r.unmatched.map((t,i)=>[G.relTime(t.received_at),t.provider,t.msisdn||'—',`<span class="mono num">${G.taka(t.amount)}</span>`,`<span class="mono">${t.ref_normalized||'—'}</span>`,`<span class="mono">${t.trx_id||'—'}</span>`,(JSON.parse(t.flags||'[]')).join(',')||'—',`<button class="btn ghost" onclick="suggest('${t.id}',this)">Suggest</button><button class="btn ghost" onclick="revealRaw('${t.id}',this)">raw</button>`])):'<div class="empty card">Nothing unmatched.</div>'}</div>
+  <div id="sugg"></div>`;
+}
+window.openReview = async (id) => {
+  const p=_rows.find(x=>x.id===id); const d=document.createElement('div'); d.className='drawer'; d.id='drawer';
+  d.innerHTML=`<div class="spread"><h2>Resolve review</h2><button class="btn ghost" onclick="document.getElementById('drawer').remove()">✕</button></div>
+  <div class="stack" style="margin-top:16px">
+  <div><span class="ref-chip">${p.reference}</span> ${chip('needs_review')}</div>
+  <div class="display num">${G.taka(p.amount)}</div>
+  <div class="mono caption">reason ${p.review_reason} · trx ${p.submitted_trx_id||'—'} · merchant ${p.merchant_name}</div>
+  <div class="field"><label>Note</label><textarea class="input" id="rvNote" rows="3" style="height:auto;padding:8px"></textarea></div>
+  <div class="row"><button class="btn accent" onclick="resolve('${p.id}','mark_paid')">Mark paid</button>
+  <button class="btn secondary" onclick="resolve('${p.id}','close')">Close / no-match</button></div>
+  <div class="caption">“Mark paid” requires an incoming transaction record as evidence — forcing without evidence is blocked.</div></div>`;
+  document.body.appendChild(d);
+};
+window.resolve = async (id, action) => {
+  try { await api(`/review/${id}/resolve`, { method:'POST', body: JSON.stringify({ action, note: document.getElementById('rvNote')?.value }) }); document.getElementById('drawer')?.remove(); G.toast('Resolved'); review(); } catch(e){ G.toast(e.message); }
+};
+window.suggest = async (txnId, btn) => {
+  const r = await api('/review/suggest/' + txnId);
+  const box = document.getElementById('sugg');
+  box.innerHTML = `<div class="card stack" style="margin-top:16px"><div class="card-title">Suggested matches</div>${r.suggestions.length?table(['Payment','Ref','Merchant','Created','Action'],r.suggestions.map(s=>[`<span class="mono">${s.id}</span>`,`<span class="mono">${s.reference}</span>`,s.merchant_name,G.relTime(s.created_at),`<button class="btn ghost" onclick="G.toast('Apply via the payment\\u2019s Open → Mark paid after confirming evidence')">note</button>`])):'No active payments with this provider+amount.'}</div>`;
+};
+window.revealRaw = async (id, btn) => {
+  const r = await api('/incoming/'+id+'/raw');
+  btn.closest('td').innerHTML = `<span class="mono" style="font-size:11px">${G.esc(r.raw.slice(0,120))}</span>`;
+};
+async function wallets() {
+  const w = await getJSON('/wallets');
+  document.getElementById('main').innerHTML = `<h1>Wallet pool</h1><div class="caption">status: active / draining / paused / frozen · limits enforced at assignment; auto-drain above 80%</div>
+  <div style="margin-top:16px">${table(['Provider','Number','Holder','Status','Daily used','Monthly used','Cap','Actions'],w.data.map(x=>{
+    const dp=Math.round(x.today_total/x.daily_limit*100), mp=Math.round(x.month_total/x.month_limit*100);
+    return [prov(x.provider),`<span class="mono">${x.msisdn}</span>`,x.holder_name,chip(x.status),
+    meter(dp),meter(mp),x.concurrency_cap,
+    `<select class="input" style="height:32px;width:110px" onchange="setWal('${x.id}',this.value)">
+      ${['active','draining','paused','frozen'].map(s=>`<option ${s===x.status?'selected':''}>${s}</option>`).join('')}</select>`];}))}</div>`;
+}
+function prov(p){const L={BKASH:'bKash',NAGAD:'Nagad',ROCKET:'Rocket'};return `<span class="row"><span class="pdot ${p}"></span>${L[p]||p}</span>`;}
+function meter(pct){return `<div style="min-width:90px"><div class="meter"><i class="${pct>90?'full':pct>75?'hot':''}" style="width:${Math.min(pct,100)}%"></i></div><span class="caption">${pct}%</span></div>`;}
+window.setWal = async (id,status) => { await api('/wallets/'+id,{method:'PATCH',body:JSON.stringify({status})}); G.toast('Wallet '+status); wallets(); };
+async function devices() {
+  const d = await getJSON('/devices');
+  document.getElementById('main').innerHTML = `<div class="spread"><h1>Device fleet</h1><button class="btn primary" id="pairBtn">+ Pair new phone</button></div>
+  <div class="caption">assignment requires heartbeat &lt; 3 minutes · remote revoke + flush SMS queue · tokens rotate every 90 days</div>
+  <div style="margin-top:16px">${table(['Name','Model','App','Status','Heartbeat','Battery','Queue','Perms','Actions'],d.data.map(x=>{
+    const on = x.last_heartbeat_at && Date.now()-new Date(x.last_heartbeat_at)<180000;
+    return [x.name,x.model||'—',x.app_version||'—',x.revoked_at?chip('revoked'):chip(on?'online':'offline'),G.relTime(x.last_heartbeat_at),(x.battery??'—')+'%',x.queue_depth,(x.permissions||'').split(',').filter(Boolean).length+'/3',
+    `${!x.revoked_at?`<button class="btn ghost" onclick="revokeDev('${x.id}')">Revoke</button><button class="btn ghost" onclick="flushDev('${x.id}')">Flush</button>`:''}`];}))}</div>
+  <div id="pairOut"></div>`;
+  document.getElementById('pairBtn').onclick = async () => {
+    const r = await api('/devices/pairing-code',{method:'POST',body:JSON.stringify({name:'Phone-'+Date.now()%1000})});
+    document.getElementById('pairOut').innerHTML = `<div class="card stack" style="margin-top:16px"><div class="card-title">Pairing code (one-time)</div>
+    <span class="ref-chip mono" style="font-size:14px">${r.pairing_code}</span>
+    <div class="caption">The Android app exchanges it at POST /v1/devices/pair for a device token. App-side build lives in ../android/ (Kotlin scaffold).</div></div>`;
+  };
+}
+window.revokeDev = async id => { await api(`/devices/${id}/revoke`,{method:'POST'}); G.toast('Device revoked — its wallets paused'); devices(); };
+window.flushDev = async id => { await api(`/devices/${id}/flush`,{method:'POST'}); G.toast('SMS queue flush flagged'); };
+async function payouts() {
+  const p = await getJSON('/payouts');
+  document.getElementById('main').innerHTML = `<h1>Payouts</h1><div class="caption">Two-person rule: approver ≠ executor. Bank details are locked after KYB.</div>
+  <div style="margin-top:16px">${p.data.length?table(['ID','Merchant','Amount','Method','Status','Requested by','Approved by','Executed by','Actions'],p.data.map(x=>[
+    `<span class="mono">${x.id}</span>`,x.merchant_name,`<span class="mono num">${G.taka(x.amount)}</span>`,x.method,chip(x.status),
+    x.requested_by||'—',x.approved_by||'—',x.executed_by||'—',
+    (x.status==='pending_approval'||x.status==='approved_by_maker')?`<button class="btn ghost" onclick="approvePo('${x.id}')">${x.status==='pending_approval'?'Approve':'Execute'}</button><button class="btn ghost" onclick="rejectPo('${x.id}')">Reject</button>`:''])):'<div class="empty card">No payouts.</div>'}</div>`;
+}
+window.approvePo = async id => { try{ await api(`/payouts/${id}/approve`,{method:'POST'}); G.toast('OK'); }catch(e){G.toast(e.message);} payouts(); };
+window.rejectPo = async id => { await api(`/payouts/${id}/reject`,{method:'POST',body:JSON.stringify({note:'rejected via console'})}); payouts(); };
+async function merchants() {
+  const m = await getJSON('/merchants');
+  document.getElementById('main').innerHTML = `<h1>Merchants</h1>
+  <div style="margin-top:16px">${table(['ID','Name','Status','KYB','Fee','Risk','Actions'],m.data.map(x=>[
+    `<span class="mono">${x.id}</span>`,x.name,chip(x.status),chip(x.kyb_status==='verified'?'verified':x.kyb_status),(x.fee_rate_bps/100)+'%',x.risk_tier,
+    x.kyb_status!=='verified'?`<button class="btn ghost" onclick="kyb('${x.id}','approve')">Approve KYB</button>`:'']))}</div>`;
+}
+window.kyb = async (id,d) => { await api(`/merchants/${id}/kyb`,{method:'POST',body:JSON.stringify({decision:d})}); merchants(); };
+async function webhooks() {
+  const w = await getJSON('/webhooks');
+  document.getElementById('main').innerHTML = `<h1>Webhook deliveries</h1><div class="caption">retry schedule 10s → 1m → 5m → 30m → 2h → 6h → 24h → failed</div>
+  <div style="margin-top:16px">${w.data.length?table(['Event','Payment','URL','Attempts','Status','Code','Next try','Action'],w.data.map(x=>[
+    x.event_type,`<span class="mono">${x.payment_id||'—'}</span>`,`<span class="mono" style="font-size:11px">${G.esc(x.url)}</span>`,x.attempts,chip(x.status),x.response_code||'—',x.next_attempt_at?G.relTime(x.next_attempt_at):'—',
+    x.status==='failed'?`<button class="btn ghost" onclick="resendWh('${x.id}')">Resend</button>`:''])):'<div class="empty card">No events yet.</div>'}</div>`;
+}
+window.resendWh = async id => { await api(`/webhooks/${id}/resend`,{method:'POST'}); G.toast('Resent'); setTimeout(webhooks, 800); };
+async function audit() {
+  const a = await getJSON('/audit');
+  document.getElementById('main').innerHTML = `<h1>Audit log</h1><div class="caption">every state change records actor, timestamp, before/after and IP</div>
+  <div style="margin-top:16px">${table(['When','Actor','Action','Object','Before → After','IP'],a.data.map(x=>[
+    `<span class="mono" style="font-size:11px">${x.created_at}</span>`,`<span class="mono">${x.actor}</span>`,`<span class="mono">${x.action}</span>`,
+    `<span class="mono" style="font-size:11px">${x.object_type||''} ${x.object_id||''}</span>`,
+    `<span class="mono" style="font-size:11px">${G.esc(String(x.before||''))} → ${G.esc(String(x.after||''))}</span>`,x.ip||'—']))}</div>`;
+}
+
+if (TOKEN) { api('/overview').then(renderShell).catch(()=>{TOKEN='';renderLogin();}); } else renderLogin();
+setInterval(()=>{ if (TOKEN && ['overview','review'].includes(view)) renderView(); }, 15000);
+</script>
+</body>
+</html>
