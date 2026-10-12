@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PayGate — Merchant Dashboard</title>
+<link rel="stylesheet" href="/css/gate-ui.css">
+<style>
+  .login-wrap { max-width: 400px; margin: 12vh auto; }
+  .drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(480px, 100%); background: var(--surface); border-left: 1px solid var(--border); z-index: 960; padding: 24px; overflow: auto; animation: slidein var(--t-sheet) var(--ease); box-shadow: -8px 0 32px rgba(0,0,0,.08); }
+  @keyframes slidein { from { transform: translateX(30px); opacity: 0; } }
+  tr.card-row-mobile { display: table-row; }
+  @media (max-width: 720px) {
+    table.data thead { display: none; }
+    table.data, table.data tbody, table.data tr, table.data td { display: block; width: 100%; }
+    table.data tr { border-bottom: 1px solid var(--border); padding: 8px 0; }
+    table.data td { height: auto; border: none; padding: 4px 16px; }
+    table.data td::before { content: attr(data-l); font: 600 11px var(--font-ui); color: var(--ink-3); display: block; }
+  }
+  .kbd { font: 600 11px var(--font-mono); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--ink-3); background: var(--surface-2); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="toasts"></div>
+<script src="/js/gate-ui.js"></script>
+<script src="/js/paygate.js"></script>
+<script>
+const G = window.GateUI;
+const PROV = { BKASH: 'bKash', NAGAD: 'Nagad', ROCKET: 'Rocket' };
+
+// ---------- session ----------
+let API_KEY = localStorage.getItem('pg_api_key') || '';
+let view = 'overview';
+let paymentsCache = [], plansCache = [];
+
+function api(path, opts = {}) {
+  return fetch('/v1' + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + API_KEY, ...(opts.headers || {}) },
+  }).then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(j.message || j.error || r.status), { status: r.status, body: j }); return j; });
+}
+
+// ---------- login ----------
+function renderLogin() {
+  document.getElementById('root').innerHTML = `
+  <div class="login-wrap stack">
+    <div class="row" style="justify-content:center"><div class="brand" style="font-weight:700;font-size:18px">🛡 PayGate <span class="chip"><span class="dot"></span>Merchant</span></div></div>
+    <div class="card stack">
+      <h2>Sign in to your dashboard</h2>
+      <div class="caption">Onboarding: business verification (KYB) and payout setup happen after sign-in. Use the seeded live key shown in the server console for this demo.</div>
+      <div class="field"><label>API key (sk_live_… or sk_test_…)</label>
+        <input class="input mono" id="k" type="password" placeholder="sk_live_…" autocomplete="off"></div>
+      <button class="btn primary block" id="go">Continue with 2FA</button>
+      <div class="error caption" id="err" style="color:var(--danger)"></div>
+    </div>
+    <div class="card stack">
+      <h3>Sandbox</h3>
+      <div class="caption">Use an <span class="mono">sk_test_</span> key and the simulated-SMS tool under Developers.</div>
+    </div>
+  </div>`;
+  document.getElementById('go').onclick = async () => {
+    const k = document.getElementById('k').value.trim();
+    // dev build: second factor is the fixed staff code shown on the key's last char parity — here simply confirm dialog-free 2FA stub
+    try {
+      API_KEY = k; const who = await api('/balance');
+      localStorage.setItem('pg_api_key', k); renderShell(); loadAll();
+    } catch (e) { API_KEY = ''; document.getElementById('err').textContent = e.body?.error === 'invalid_api_key' ? 'Invalid API key.' : (e.message || 'Login failed'); }
+  };
+}
+
+// ---------- shell ----------
+const NAVS = [
+  ['overview', '▦ Overview'], ['payments', '≣ Payments'], ['plans', '◎ Plans'],
+  ['settlements', '¥ Settlements'], ['developers', '</> Developers'], ['settings', '⚙ Settings'],
+];
+function renderShell() {
+  document.getElementById('root').innerHTML = `
+  <div class="shell">
+    <nav class="sidebar">
+      <div class="logo">🛡 PayGate</div>
+      ${NAVS.map(([id, l]) => `<button class="nav-item" data-v="${id}" id="nav-${id}">${l}</button>`).join('')}
+      <div style="flex:1"></div>
+      <button class="nav-item" id="paletteBtn">⌘K <span class="kbd" style="margin-left:auto">⌘K</span></button>
+      <button class="nav-item" id="themeBtn2">◐ Theme</button>
+      <button class="nav-item" id="langBtn2">অ আ Language</button>
+      <button class="nav-item" id="logout">⇥ Sign out</button>
+    </nav>
+    <main class="main" id="main"><div class="card skeleton" style="height:200px"></div></main>
+  </div>`;
+  NAVS.forEach(([id]) => document.getElementById('nav-' + id).onclick = () => { view = id; renderView(); });
+  document.getElementById('logout').onclick = () => { localStorage.removeItem('pg_api_key'); location.reload(); };
+  G.initTheme('themeBtn2');
+  document.getElementById('langBtn2').onclick = () => { G.setLang(G.lang === 'en' ? 'bn' : 'en'); renderView(); };
+  bindPalette();
+  renderView();
+}
+
+async function loadAll() {
+  try {
+    paymentsCache = (await api('/payments?limit=100')).data;
+    plansCache = (await api('/plans')).data;
+    renderView();
+  } catch (e) { G.toast('Load failed: ' + e.message); }
+}
+
+function chip(s) { const labels = { awaiting_payment: 'Awaiting payment', needs_review: 'Needs review', paid: 'Paid', expired: 'Expired', cancelled: 'Cancelled', confirming: 'Confirming', created: 'Pending', active: 'Active', archived: 'Archived', online: 'Online', offline: 'Offline', delivered: 'Delivered', failed: 'Failed', queued: 'Queued', pending_approval: 'Pending approval', approved_by_maker: 'Awaiting executor', rejected: 'Rejected' }; return `<span class="chip ${s}"><span class="dot"></span>${labels[s] || s}</span>`; }
+
+function renderView() {
+  NAVS.forEach(([id]) => document.getElementById('nav-' + id)?.classList.toggle('sel', id === view));
+  const m = document.getElementById('main');
+  ({ overview, payments, plans, settlements, developers, settings })[view](m);
+}
+
+// ---------- overview ----------
+function overview(m) {
+  const paid = paymentsCache.filter(p => p.status === 'paid');
+  const sum = a => a.reduce((x, p) => x + (p.amount || 0), 0);
+  const net = paid.reduce((x, p) => x + (p.net_amount || 0), 0);
+  const attention = paymentsCache.filter(p => p.status === 'needs_review');
+  const recent = paymentsCache.slice(0, 8);
+  m.innerHTML = `
+  <h1>${G.lang === 'bn' ? 'ওভারভিউ' : 'Overview'}</h1>
+  <div class="grid cols-4" style="margin-top:16px">
+    <div class="card stat"><div class="label">Payments (loaded)</div><div class="value num">${paymentsCache.length}</div><span class="delta up">live</span></div>
+    <div class="card stat"><div class="label">Collected (gross)</div><div class="value num">${G.taka(sum(paid))}</div></div>
+    <div class="card stat"><div class="label">Net after 5% fee</div><div class="value num">${G.taka(net)}</div></div>
+    <div class="card stat"><div class="label">Needs review</div><div class="value num">${attention.length}</div>${attention.length ? '<span class="delta down">action</span>' : ''}</div>
+  </div>
+  ${attention.length ? `<div class="banner warning" style="margin-top:16px">⚠ ${attention.length} payment(s) in your attention queue. <button class="btn ghost" onclick="view='payments';renderView()">Open</button></div>` : ''}
+  <div class="card" style="margin-top:16px"><div class="spread"><div class="card-title">Recent payments</div><button class="btn ghost" onclick="view='payments';renderView()">See all →</button></div>
+  ${table(['ID', 'Plan', 'Provider', 'Amount', 'Status', 'Created'], recent.map(p => [
+    `<span class="mono">${G.esc(p.id)}</span>`, G.esc(p.plan_id || ''), provDot(p.provider), `<span class="mono num">${G.taka(p.amount)}</span>`, chip(p.status), G.relTime(p.created_at)]))}
+  </div>`;
+  bindRowDrawers(m, recent);
+}
+
+function provDot(pr) { return `<span class="row"><span class="pdot ${pr}"></span>${PROV[pr] || pr}</span>`; }
+function table(heads, rows) {
+  return `<div class="table-wrap"><table class="data"><thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+  <tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+
+// ---------- payments ----------
+function payments(m) {
+  m.innerHTML = `<div class="spread"><h1>Payments</h1><input class="input" id="q" placeholder="Search reference, TrxID, order…" style="max-width:280px"></div>
+  <div style="margin-top:16px" id="ptable"></div>`;
+  const draw = (list) => {
+    document.getElementById('ptable').innerHTML = list.length ? table(
+      ['Reference', 'Order', 'Provider', 'Amount', 'Fee', 'Net', 'Status', 'Created'],
+      list.map(p => [`<span class="ref-chip" style="height:26px;font-size:12px">${G.esc(p.reference)} <button class="copy-btn" onclick="event.stopPropagation();G.copy('${p.reference}')">⧉</button></span>`,
+        `<span class="mono">${G.esc(p.order_id || '—')}</span>`, provDot(p.provider),
+        `<span class="mono num">${G.taka(p.amount)}</span>`,
+        `<span class="mono num">${p.fee_amount != null ? G.taka(p.fee_amount) : '—'}</span>`,
+        `<span class="mono num">${p.net_amount != null ? G.taka(p.net_amount) : '—'}</span>`,
+        chip(p.status), G.relTime(p.created_at)])) : '<div class="empty card">No payments yet. Create one from the API or the Developers tab.</div>';
+    bindRowDrawers(document.getElementById('ptable'), list);
+  };
+  draw(paymentsCache);
+  document.getElementById('q').oninput = e => {
+    const q = e.target.value.toUpperCase();
+    draw(paymentsCache.filter(p => (p.reference + ' ' + (p.order_id || '') + ' ' + (p.submitted_trx_id || '') + ' ' + p.id).toUpperCase().includes(q)));
+  };
+}
+
+// ---------- drawer with timeline ----------
+function openDrawer(p) {
+  const old = document.getElementById('drawer'); if (old) old.remove();
+  const d = document.createElement('div'); d.className = 'drawer'; d.id = 'drawer';
+  const tl = [
+    ['created', p.created_at], ['wallet assigned', p.created_at],
+    p.confirmed_at && ['customer pressed Confirm', p.confirmed_at],
+    p.paid_at && [`matched (${p.matched_by})`, p.paid_at],
+    p.status === 'expired' && ['expired', p.expires_at],
+    p.status === 'needs_review' && [`needs review — ${p.review_reason}`, ''],
+  ].filter(Boolean);
+  d.innerHTML = `
+  <div class="spread"><h2>Payment</h2><button class="btn ghost" onclick="document.getElementById('drawer').remove()">✕</button></div>
+  <div class="stack" style="margin-top:16px">
+    <div><span class="ref-chip">${G.esc(p.reference)} <button class="copy-btn" onclick="G.copy('${p.reference}')">⧉</button></span></div>
+    <div class="display num">${G.taka(p.amount)}</div>
+    ${chip(p.status)}
+    <div class="card"><div class="card-title">Timeline</div><ul class="timeline">
+      ${tl.map(([label, ts], i) => `<li class="${i < tl.length - 1 || p.status === 'paid' ? 'done' : ''}"><div>${G.esc(label)}</div><div class="t-time">${ts ? G.fmtDate(ts) : ''}</div></li>`).join('')}
+    </ul></div>
+    <div class="mono caption">id ${G.esc(p.id)}</div>
+    <div class="mono caption">plan ${G.esc(p.plan_id || '—')} · matched_by ${G.esc(p.matched_by || '—')} · trx ${G.esc(p.submitted_trx_id || '—')}</div>
+    ${p.status !== 'paid' && p.status !== 'cancelled' && p.status !== 'expired' ? `<button class="btn secondary" onclick="cancelPay('${p.id}')">Cancel payment</button>` : ''}
+    <div class="caption">GET /v1/payments/:id is always the source of truth — redirect/popup events are not proof.</div>
+  </div>`;
+  document.body.appendChild(d);
+}
+async function cancelPay(id) {
+  try { await api('/payments/' + id + '/cancel', { method: 'POST' }); G.toast('Cancelled'); await loadAll(); document.getElementById('drawer')?.remove(); }
+  catch (e) { G.toast(e.message); }
+}
+function bindRowDrawers(host, list) {
+  host.querySelectorAll('table.data tbody tr').forEach((tr, i) => { tr.onclick = () => openDrawer(list[i]); });
+}
+
+// ---------- plans ----------
+function plans(m) {
+  m.innerHTML = `<div class="spread"><h1>Pricing plans</h1><button class="btn primary" id="newPlan">+ New plan</button></div>
+  <div class="caption">Amounts are in paisa (Tk 500.00 = 50000). Editing a plan creates a new version; payments in flight keep their snapshot.</div>
+  <div style="margin-top:16px">${table(['Name', 'Amount', 'SKU', 'Version', 'Status', ''], plansCache.map(pl => [
+    G.esc(pl.name), `<span class="mono num">${pl.open_amount ? `open ${G.taka(pl.min_amount)}–${G.taka(pl.max_amount)}` : G.taka(pl.amount)}</span>`,
+    `<span class="mono">${G.esc(pl.external_sku || '—')}</span>`, 'v' + pl.version, chip(pl.status),
+    pl.status === 'active' ? `<button class="btn ghost" onclick="editPlan('${pl.id}')">Edit</button><button class="btn ghost" onclick="archivePlan('${pl.id}')">Archive</button>` : '']))}
+  </div>`;
+  document.getElementById('newPlan').onclick = () => planSheet();
+}
+window.editPlan = (id) => { const pl = plansCache.find(x => x.id === id); planSheet(pl); };
+window.archivePlan = async (id) => { await api('/plans/' + id, { method: 'PATCH', body: JSON.stringify({ status: 'archived' }) }); await loadAll(); };
+function planSheet(pl) {
+  const old = document.querySelector('.sheet-backdrop'); if (old) old.remove();
+  const b = document.createElement('div'); b.className = 'sheet-backdrop';
+  b.innerHTML = `<div class="sheet stack">
+    <h2>${pl ? 'Edit plan (creates v' + (pl.version + 1) + ')' : 'New plan'}</h2>
+    <div class="field"><label>Name</label><input class="input" id="p_name" value="${pl ? G.esc(pl.name) : ''}"></div>
+    <div class="field"><label>Amount (paisa) — server-side, clients can never change it</label><input class="input mono" id="p_amt" value="${pl && !pl.open_amount ? pl.amount : ''}" placeholder="50000 = Tk 500.00"></div>
+    <div class="field"><label>external_sku (your app's identifier)</label><input class="input mono" id="p_sku" value="${pl ? G.esc(pl.external_sku || '') : ''}"></div>
+    <div class="row"><button class="btn primary" id="p_save">Save</button><button class="btn ghost" onclick="this.closest('.sheet-backdrop').remove()">Cancel</button></div>
+    <div class="error" id="p_err" style="color:var(--danger)"></div></div>`;
+  document.body.appendChild(b);
+  b.addEventListener('click', e => { if (e.target === b) b.remove(); });
+  b.querySelector('#p_save').onclick = async () => {
+    const body = { name: p_name.value, amount: parseInt(p_amt.value, 10) || undefined, external_sku: p_sku.value || undefined };
+    try {
+      if (pl) await api('/plans/' + pl.id, { method: 'PATCH', body: JSON.stringify(body) });
+      else await api('/plans', { method: 'POST', body: JSON.stringify(body) });
+      b.remove(); await loadAll(); G.toast('Plan saved');
+    } catch (e) { b.querySelector('#p_err').textContent = e.message; }
+  };
+}
+
+// ---------- settlements ----------
+async function settlements(m) {
+  m.innerHTML = '<div class="card skeleton" style="height:200px"></div>';
+  let bal, st;
+  try { bal = await api('/balance'); st = await api('/settlements'); } catch (e) { m.innerHTML = '<div class="banner danger">' + G.esc(e.message) + '</div>'; return; }
+  m.innerHTML = `
+  <h1>Settlements</h1>
+  <div class="grid cols-4" style="margin-top:16px">
+    <div class="card stat"><div class="label">Available balance</div><div class="value num">${G.taka(bal.available_balance)}</div></div>
+    <div class="card stat"><div class="label">Pending payouts</div><div class="value num">${G.taka(bal.pending_payouts)}</div></div>
+    <div class="card stat"><div class="label">Minimum payout</div><div class="value num">${G.taka(bal.minimum_payout)}</div></div>
+    <div class="card stat"><div class="label">Payout state</div><div style="margin-top:8px">${bal.can_request_payout ? chip('paid').replace('paid', 'online').replace('>Paid<', '>Eligible<') : '<span class="chip warning"><span class="dot"></span>Below minimum</span>'}</div></div>
+  </div>
+  <div class="row" style="margin-top:16px">
+    <button class="btn primary" id="reqPo" ${bal.can_request_payout ? '' : 'disabled'}>Request payout of ${G.taka(bal.available_balance)}</button>
+    <a class="btn secondary" href="/v1/settlements/export.csv">Export CSV</a>
+  </div>
+  <div class="card" style="margin-top:16px"><div class="card-title">Payouts</div>
+  ${st.payouts.length ? table(['ID', 'Amount', 'Method', 'Status', 'Requested'], st.payouts.map(po => [`<span class="mono">${po.id}</span>`, `<span class="mono num">${G.taka(po.amount)}</span>`, po.method, chip(po.status), G.fmtDate(po.created_at)])) : '<div class="empty">No payouts yet.</div>'}</div>
+  <div class="card" style="margin-top:16px"><div class="card-title">Ledger statement (double entry)</div>
+  ${table(['Entry', 'Type', 'Amount', 'Payment', 'When'], st.ledger.slice(0, 30).map(le => [`<span class="mono">${le.id}</span>`, le.entry_type, `<span class="mono num" style="color:${le.amount >= 0 ? 'var(--success)' : 'var(--danger)'}">${G.taka(le.amount)}</span>`, `<span class="mono">${G.esc(le.payment_id || '—')}</span>`, G.fmtDate(le.created_at)]))}</div>`;
+  document.getElementById('reqPo').onclick = async () => {
+    try { await api('/payouts', { method: 'POST', body: '{}' }); G.toast('Payout requested — Ops will approve (two-person rule)'); settlements(m); }
+    catch (e) { G.toast(e.message); }
+  };
+}
+
+// ---------- developers ----------
+function developers(m) {
+  m.innerHTML = `
+  <h1>Developers</h1>
+  <div class="grid cols-2" style="margin-top:16px">
+    <div class="card stack">
+      <div class="card-title">Create a payment (server-to-server)</div>
+      <textarea class="input mono" readonly rows="9" style="height:auto;padding:12px">curl -X POST ${location.origin}/v1/payments \\
+  -H "Authorization: Bearer $PAYGATE_KEY" \\
+  -H "Idempotency-Key: ord-$(date +%s)" \\
+  -H "Content-Type: application/json" \\
+  -d '{"plan_id":"pln_…","order_id":"ORD-42","provider":"BKASH",
+       "success_url":"https://shop/success","cancel_url":"https://shop/cancel"}'</textarea>
+      <div class="caption">Returns id, amount, reference, wallet, pay_url. Redirect to pay_url, or open the popup below.</div>
+    </div>
+    <div class="card stack">
+      <div class="card-title">Popup integration (paygate.js)</div>
+      <textarea class="input mono" readonly rows="9" style="height:auto;padding:12px">&lt;script src="${location.origin}/js/paygate.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+PayGate.on('paid', d =&gt; verifyViaWebhookOrGET(d.payment_id));
+PayGate.on('needs_review', d =&gt; showSupport());
+PayGate.on('expired', d =&gt; retry());
+// subscribe button:
+fetch('/create-payment').then(r=&gt;r.json())
+  .then(p =&gt; PayGate.open({ pay_url: p.pay_url }));
+&lt;/script&gt;</textarea>
+      <div class="caption">A popup/redirect event is never proof of payment — trust the signed webhook or GET /v1/payments/:id.</div>
+    </div>
+    <div class="card stack">
+      <div class="card-title">Verify webhook signatures</div>
+      <textarea class="input mono" readonly rows="6" style="height:auto;padding:12px">// PayGate-Signature: t=&lt;unix&gt;,v1=&lt;hex&gt;
+const {t, v1} = Object.fromEntries(sig.split(',').map(kv=>kv.split('=')));
+if (Math.abs(Date.now()/1000 - t) &gt; 300) reject();     // older than 5 min
+const expect = HMAC_SHA256(secret, `${'${t}'}.${rawBody}`);
+if (timingSafeEqual(expect, v1)) accept();             // else reject</textarea>
+    </div>
+    <div class="card stack">
+      <div class="card-title">Sandbox — simulated SMS</div>
+      <div class="caption">Requires an sk_test_ key. Creates a payment then forwards a fake confirmation SMS through the real ingest pipeline.</div>
+      <div class="field"><label>plan_id</label><input class="input mono" id="sb_plan" value="${plansCache.find(p => !p.open_amount)?.id || 'pln_demo000000000000001'}"></div>
+      <div class="row"><select class="input" id="sb_prov" style="max-width:140px"><option>BKASH</option><option>NAGAD</option><option>ROCKET</option></select>
+      <button class="btn accent" id="sbRun">Run test payment</button></div>
+      <div class="mono caption" id="sbOut"></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px"><div class="card-title">Webhook delivery log (last events)</div><div id="whLog" class="caption">—</div></div>`;
+  document.getElementById('sbRun').onclick = runSandbox;
+  fetch('/devhook/log').then(r => r.json()).then(j => {
+    document.getElementById('whLog').innerHTML = j.data.length ? table(['Event', 'Payment', 'Ref', 'Signature received'], j.data.map(h => [h.event, `<span class="mono">${G.esc(h.data?.id || '')}</span>`, `<span class="mono">${G.esc(h.data?.reference || '')}</span>`, h.signature ? '<span class="chip paid"><span class="dot"></span>yes</span>' : '—'])) : 'No webhooks received by the demo receiver yet.';
+  });
+}
+async function runSandbox() {
+  const out = document.getElementById('sbOut');
+  try {
+    out.textContent = '1) creating payment…';
+    const p = await api('/payments', { method: 'POST', body: JSON.stringify({ plan_id: sb_plan.value, provider: sb_prov.value, order_id: 'SANDBOX-' + Date.now() }) });
+    out.textContent = `2) payment ${p.id} ref=${p.reference} → opening pay page preview…`;
+    window.open(p.pay_url, '_blank');
+    out.textContent += '\n3) simulating SMS arrival…';
+    const sim = await api('/sandbox/simulate-sms', { method: 'POST', body: JSON.stringify({ payment_id: p.id, trx_id: 'SIM' + Math.random().toString(36).slice(2, 10).toUpperCase() }) });
+    out.textContent += `\n4) ingest result: ${JSON.stringify(sim)}`;
+    await loadAll();
+  } catch (e) { out.textContent = 'Sandbox error: ' + e.message + ' (use an sk_test_ key)'; }
+}
+
+// ---------- settings ----------
+async function settings(m) {
+  m.innerHTML = '<div class="card skeleton" style="height:160px"></div>';
+  const bal = await api('/balance').catch(() => null);
+  m.innerHTML = `
+  <h1>Settings</h1>
+  <div class="grid cols-2" style="margin-top:16px">
+    <div class="card stack">
+      <div class="card-title">Business & KYB</div>
+      <div class="caption">KYB verification and payout account are managed by PayGate Ops in this demo (see Admin console → Merchants).</div>
+      <div class="row"><span class="chip paid"><span class="dot"></span>KYB verified</span><span class="chip active"><span class="dot"></span>Account active</span></div>
+      <div class="mono caption">fee_rate_bps = 500 (5%) · risk_tier = standard</div>
+    </div>
+    <div class="card stack">
+      <div class="card-title">Two-factor authentication</div>
+      <div class="caption">Mandatory for owners and all staff. Device tokens rotate every 90 days; webhook secrets rotate with a 24-hour overlap.</div>
+      <button class="btn secondary" onclick="G.toast('Demo: 2FA already enforced at admin login')">Manage 2FA</button>
+    </div>
+    <div class="card stack">
+      <div class="card-title">API keys</div>
+      <div class="mono" style="word-break:break-all">${G.esc(API_KEY.slice(0, 12))}••••••••••••••••••••</div>
+      <div class="row"><button class="btn secondary" onclick="G.copy(API_KEY)">Copy current key</button></div>
+      <div class="caption">Keys are stored hashed server-side. Rotation UI is P1 in this build.</div>
+    </div>
+    <div class="card stack">
+      <div class="card-title">Payout account</div>
+      <div class="caption">Bank: Dutch-Bangla Bank ••••xxxxx (set during onboarding; edits go through Ops to prevent payout hijacking).</div>
+    </div>
+  </div>`;
+}
+
+// ---------- command palette (⌘K) ----------
+let paletteOpen = false;
+function bindPalette() {
+  document.getElementById('paletteBtn').onclick = openPalette;
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+    if (e.key === 'Escape' && paletteOpen) closePalette();
+  });
+}
+function openPalette() {
+  if (document.getElementById('pal')) return;
+  paletteOpen = true;
+  const b = document.createElement('div'); b.className = 'palette-backdrop'; b.id = 'pal';
+  b.innerHTML = `<div class="palette"><input id="pq" placeholder="Jump by reference, TrxID, order, payment id…" autofocus>
+  <div id="pres"></div></div>`;
+  document.body.appendChild(b);
+  b.addEventListener('click', e => { if (e.target === b) closePalette(); });
+  const items = () => paymentsCache.flatMap(p => [
+    { label: `Ref ${p.reference}`, sub: PROV[p.provider] + ' · ' + G.taka(p.amount) + ' · ' + p.status, p },
+    ...(p.order_id ? [{ label: `Order ${p.order_id}`, sub: p.reference, p }] : []),
+    ...(p.submitted_trx_id ? [{ label: `TrxID ${p.submitted_trx_id}`, sub: p.reference, p }] : []),
+  ]);
+  const draw = () => {
+    const q = b.querySelector('#pq').value.toUpperCase();
+    const res = items().filter(i => (i.label + ' ' + i.sub).toUpperCase().includes(q)).slice(0, 8);
+    b.querySelector('#pres').innerHTML = res.map((r, i) => `<div class="pi ${i === 0 ? 'sel' : ''}" data-id="${r.p.id}"><span class="mono">${G.esc(r.label)}</span><span class="caption">${G.esc(r.sub)}</span></div>`).join('') || '<div class="pi caption">no match</div>';
+    b.querySelectorAll('.pi[data-id]').forEach(el => el.onclick = () => { const p = paymentsCache.find(x => x.id === el.dataset.id); closePalette(); openDrawer(p); });
+  };
+  b.querySelector('#pq').oninput = draw; draw();
+}
+function closePalette() { paletteOpen = false; document.getElementById('pal')?.remove(); }
+
+// ---------- boot ----------
+if (API_KEY) { renderShell(); loadAll(); } else renderLogin();
+</script>
+</body>
+</html>

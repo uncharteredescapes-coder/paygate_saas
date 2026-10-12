@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PayGate — Pay securely</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="/css/gate-ui.css">
+<style>
+  body { display: flex; justify-content: center; }
+  .paywrap { width: min(440px, 100%); padding: 20px 16px 48px; min-height: 100vh; display: flex; flex-direction: column; }
+  .brandbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .brand { display: flex; gap: 8px; align-items: center; font-weight: 700; }
+  .brand svg circle { fill: var(--accent); }
+  .amount-hero { text-align: center; padding: 20px 0 8px; }
+  .amount-hero .display { font-size: 40px; line-height: 48px; }
+  .steps { counter-reset: step; }
+  .step { display: flex; gap: 12px; padding: 12px 0; }
+  .step::before { counter-increment: step; content: counter(step); flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font: 700 12px/24px var(--font-ui); text-align: center; }
+  .valuebox { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-input); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; }
+  .valuebox .mono { font-size: 16px; font-weight: 700; letter-spacing: .03em; }
+  .countdown { font: 600 12px var(--font-mono); color: var(--warning); }
+  .countdown.danger { color: var(--danger); }
+  /* Loading screen */
+  .loading-screen { text-align: center; padding: 64px 16px; }
+  .spinner { width: 56px; height: 56px; margin: 0 auto 24px; border-radius: 50%; border: 4px solid var(--border); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
+  .result-icon { margin: 0 auto 16px; display: block; }
+  @media (max-width: 359px) { .paywrap { padding-left: 10px; padding-right: 10px; } }
+</style>
+</head>
+<body>
+<div class="paywrap" id="app">
+  <div class="brandbar">
+    <div class="brand"><svg width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9"/></svg> PayGate</div>
+    <div class="row">
+      <button class="btn ghost" id="langBtn" style="height:32px;font-size:12px">বাংলা</button>
+      <button class="btn ghost" id="themeBtn" aria-label="Toggle dark mode" style="height:32px;width:32px;padding:0">◐</button>
+    </div>
+  </div>
+  <div id="view"><div class="card skeleton" style="height:300px"></div></div>
+</div>
+<script src="/js/gate-ui.js"></script>
+<script>
+const G = window.GateUI;
+G.initTheme('themeBtn');
+const PAY_ID = location.pathname.split('/').filter(Boolean).pop();
+let data = null, timer = null;
+
+const PROV_LABEL = { BKASH: 'bKash', NAGAD: 'Nagad', ROCKET: 'Rocket' };
+
+async function load() {
+  const r = await fetch(`/v1/pay/${PAY_ID}`);
+  if (!r.ok) return showError('This payment link is not valid.');
+  data = await r.json();
+  render();
+}
+
+function showError(msg) {
+  document.getElementById('view').innerHTML = `<div class="card empty"><h3>${G.esc(msg)}</h3></div>`;
+}
+
+function countdownHtml() {
+  return `<div class="countdown" id="cd"></div>`;
+}
+function startCountdown() {
+  clearInterval(timer);
+  const el = () => document.getElementById('cd');
+  const tick = () => {
+    if (!data || !el()) return;
+    const ms = new Date(data.expires_at) - Date.now();
+    if (ms <= 0) { el() && (el().textContent = 'Expired'); load(); return; }
+    const m = Math.floor(ms / 60000), s = Math.floor(ms % 60000 / 1000);
+    const e = el(); if (e) { e.textContent = `${G.t('time_left')} ${m}:${String(s).padStart(2, '0')}`; e.className = 'countdown' + (ms < 5 * 60000 ? ' danger' : ''); }
+  };
+  tick(); timer = setInterval(tick, 1000);
+}
+
+function render() {
+  const v = document.getElementById('view');
+  if (['paid', 'needs_review', 'expired', 'cancelled'].includes(data.status)) return renderResult(data.status, {});
+  const prov = PROV_LABEL[data.provider] || data.provider;
+  v.innerHTML = `
+  <div class="stack">
+    <div class="amount-hero card">
+      <div class="caption">${G.t('pay_title')} · ${G.esc(data.merchant || '')}</div>
+      <div class="display num" style="margin-top:4px">${G.taka(data.amount)}</div>
+      <div class="row" style="justify-content:center;margin-top:8px">
+        <span class="chip"><span class="pdot ${data.provider}" style="width:10px;height:10px"></span>${prov}</span>
+        ${countdownHtml()}
+      </div>
+    </div>
+
+    <div class="card steps">
+      <div class="step"><div style="flex:1">
+        <div class="caption">${G.t('step1', { p: prov })}</div>
+        <div class="valuebox"><span class="mono">${G.esc(data.wallet.number)}</span>
+          <button class="copy-btn" onclick="G.copy('${G.esc(data.wallet.number)}')">⧉ ${G.t('copy')}</button></div>
+        <div class="caption" style="margin-top:4px">${G.t('holder')}: ${G.esc(data.wallet.holder_name || '')}</div>
+      </div></div>
+      <div class="step"><div style="flex:1">
+        <div class="caption">${G.t('step2')}</div>
+        <div class="valuebox" style="background:var(--accent-soft);border-color:transparent">
+          <span class="ref-chip" style="background:transparent;color:var(--accent)">${G.esc(data.reference)}</span>
+          <button class="copy-btn" onclick="G.copy('${G.esc(data.reference)}')">⧉ ${G.t('copy')}</button></div>
+      </div></div>
+      <div class="step"><div style="flex:1">
+        <div class="field"><label>${G.t('trxid_label')}</label>
+        <input class="input mono" id="trx" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="${G.t('trxid_ph')}" maxlength="24">
+        <div class="error" id="trxErr"></div></div>
+        <button class="btn primary block" id="confirmBtn">${G.t('confirm')}</button>
+      </div></div>
+    </div>
+    <div class="caption" style="text-align:center">🔒 ${G.esc(prov)} · PayGate ${G.lang === 'bn' ? 'নিরাপদ পেমেন্ট' : 'secure payment'}</div>
+  </div>`;
+  startCountdown();
+  document.getElementById('confirmBtn').addEventListener('click', confirmPayment);
+  document.getElementById('trx').addEventListener('input', e => { e.target.value = e.target.value.toUpperCase(); });
+}
+
+async function confirmPayment() {
+  const trx = document.getElementById('trx').value.trim();
+  const err = document.getElementById('trxErr');
+  if (trx.length < 6) { err.textContent = G.t('wrong_trxid'); return; }
+  const btn = document.getElementById('confirmBtn');
+  btn.classList.add('loading');
+  showLoading();
+  try {
+    const r = await fetch(`/v1/pay/${PAY_ID}/confirm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trx_id: trx }),
+    });
+    const out = await r.json();
+    btn.classList.remove('loading');
+    if (r.status === 422) { render(); err.textContent = out.message || G.t('wrong_trxid'); return; }
+    if (r.status === 423) { render(); err.textContent = G.t('locked'); return; }
+    if (r.status === 409) { render(); err.textContent = G.t('already_used'); return; }
+    if (out.still_checking) { showStillChecking(trx); pollAfterStill(trx); return; }
+    data = { ...data, status: out.status, review_reason: out.review_reason, message: out.message };
+    renderResult(out.status, out);
+  } catch (e) {
+    btn.classList.remove('loading'); render(); err.textContent = 'Network error — please retry.';
+  }
+}
+
+function showLoading() {
+  clearInterval(timer);
+  document.getElementById('view').innerHTML = `
+    <div class="card loading-screen">
+      <div class="spinner" role="status" aria-label="${G.t('loading')}"></div>
+      <h2>${G.t('loading')}</h2>
+      <div class="caption">${G.t('loading_sub')}</div>
+    </div>`;
+}
+
+function showStillChecking(trx) {
+  document.getElementById('view').innerHTML = `
+    <div class="card loading-screen">
+      <div class="spinner"></div>
+      <h2>${G.t('still_checking')}</h2>
+      <div class="caption">${G.t('still_checking_sub')}</div>
+      <div class="stack" style="margin-top:24px;text-align:left">
+        <div class="field"><label>${G.t('trxid_label')}</label>
+          <input class="input mono" id="trx2" value="${G.esc(trx)}" maxlength="24">
+          <div class="error" id="trx2Err"></div>
+          <button class="btn secondary block" id="recheck" style="margin-top:8px">${G.t('confirm')} — ${G.lang === 'bn' ? 'আবার যাচাই' : 're-check'}</button>
+        </div>
+        <a class="caption" href="#" onclick="return false">${G.t('support')}</a>
+      </div>
+    </div>`;
+  document.getElementById('recheck').addEventListener('click', () => {
+    const t2 = document.getElementById('trx2').value.trim();
+    if (t2 !== trx) { PAY_TRX_OVERRIDE = t2; }
+    confirmPaymentWith(t2);
+  });
+}
+let PAY_TRX_OVERRIDE = null;
+async function confirmPaymentWith(trx) {
+  showLoading();
+  const r = await fetch(`/v1/pay/${PAY_ID}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trx_id: trx }) });
+  const out = await r.json();
+  if (out.still_checking) { showStillChecking(trx); return; }
+  if (r.status >= 400) { showStillChecking(trx); document.getElementById('trx2Err').textContent = out.message || ''; return; }
+  renderResult(out.status, out);
+}
+
+// After "still checking", keep polling the lightweight GET until terminal state.
+function pollAfterStill() {
+  const iv = setInterval(async () => {
+    const r = await fetch(`/v1/pay/${PAY_ID}`); const d = await r.json();
+    if (['paid', 'needs_review', 'expired', 'cancelled'].includes(d.status)) { clearInterval(iv); data = d; renderResult(d.status, { message: d.message }); }
+  }, 4000);
+  setTimeout(() => clearInterval(iv), 30 * 60000);
+}
+
+function renderResult(status, out) {
+  clearInterval(timer);
+  const v = document.getElementById('view');
+  const back = data.success_url_hint || '';
+  let icon = '', title = '', sub = '', cls = '';
+  if (status === 'paid') {
+    icon = `<svg class="result-icon checkdraw" width="72" height="72" viewBox="0 0 72 72" fill="none"><circle cx="36" cy="36" r="32" stroke="#12B76A" stroke-width="4"/><path d="M22 37l10 10 19-21" stroke="#12B76A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    title = G.t('paid'); sub = `${G.taka(data.amount)}${data.order_id ? ' · ' + G.esc(data.order_id) : ''}. ${G.t('paid_sub')}`; cls = 'success';
+  } else if (status === 'needs_review') {
+    icon = `<svg class="result-icon" width="72" height="72" viewBox="0 0 72 72" fill="none"><circle cx="36" cy="36" r="32" stroke="#F79009" stroke-width="4"/><path d="M36 20v20M36 48v2" stroke="#F79009" stroke-width="5" stroke-linecap="round"/></svg>`;
+    title = G.t('review'); sub = out.message || (data.message) || ''; cls = 'warning';
+  } else if (status === 'expired') {
+    icon = `<svg class="result-icon" width="72" height="72" viewBox="0 0 72 72" fill="none"><circle cx="36" cy="36" r="32" stroke="#F04438" stroke-width="4"/><path d="M26 26l20 20M46 26L26 46" stroke="#F04438" stroke-width="5" stroke-linecap="round"/></svg>`;
+    title = G.t('expired'); sub = G.t('expired_sub'); cls = 'danger';
+  } else {
+    title = G.t('cancel'); sub = ''; cls = '';
+  }
+  v.innerHTML = `
+    <div class="card" style="text-align:center;padding:32px 20px">
+      ${icon}<h2>${title}</h2>
+      <div class="caption" style="margin-top:8px">${sub}</div>
+      <div class="row" style="justify-content:center;margin-top:24px">
+        ${status === 'paid' ? `<button class="btn primary" onclick="finish()">${G.t('back_shop')}</button>` : ''}
+        ${status === 'needs_review' ? `<a class="btn secondary" href="#">${G.t('support')}</a>` : ''}
+        ${status === 'expired' ? `<button class="btn secondary" onclick="history.back()">${G.t('back_shop')}</button>` : ''}
+      </div>
+      <div class="mono caption" style="margin-top:16px">Ref ${G.esc(data.reference || '')}</div>
+    </div>`;
+  // Popup mode via paygate.js: relay the event to the parent window
+  try { if (window.parent !== window) window.parent.postMessage({ paygate: true, event: status, payment_id: PAY_ID, reference: data.reference }, '*'); } catch {}
+}
+function finish() {
+  try { if (window.parent !== window) { window.parent.postMessage({ paygate: true, event: 'paid_done', payment_id: PAY_ID }, '*'); return; } } catch {}
+  history.back();
+}
+
+document.getElementById('langBtn').addEventListener('click', (e) => {
+  G.setLang(G.lang === 'en' ? 'bn' : 'en');
+  e.target.textContent = G.t('lang_toggle');
+  if (data) render();
+});
+document.getElementById('langBtn').textContent = G.t('lang_toggle');
+load();
+</script>
+</body>
+</html>
